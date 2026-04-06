@@ -1,6 +1,7 @@
 import {beforeEach, describe, expect, it, vi} from "vitest";
 import {doFetchWithRetry} from "../../utility/http/doFetchWithRetry.ts";
-import XSocialMediaProvider, {XProviderOptionsSchema} from "../XSocialMediaProvider.ts";
+import {XProviderOptionsSchema} from "../schema";
+import XSocialMediaProvider from "../XSocialMediaProvider.ts";
 
 vi.mock("../../utility/http/doFetchWithRetry.ts", () => ({
   doFetchWithRetry: vi.fn(),

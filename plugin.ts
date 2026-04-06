@@ -1,26 +1,43 @@
 import {TokenRingPlugin} from "@tokenring-ai/app";
-import {SocialMediaConfigSchema, SocialMediaService} from "../social/index.ts";
 import {z} from "zod";
+import {SocialMediaService} from "../social/index.ts";
 import packageJSON from "./package.json" with {type: "json"};
-import XSocialMediaProvider, {XProviderOptionsSchema} from "./XSocialMediaProvider.ts";
+import {XConfigSchema, type XProviderOptions} from "./schema.ts";
+import XSocialMediaProvider from "./XSocialMediaProvider.ts";
 
 const packageConfigSchema = z.object({
-  social: SocialMediaConfigSchema.optional(),
+  x: XConfigSchema.prefault({
+    accounts: {}
+  })
 });
+
+function addAccountsFromEnv(accounts: Record<string, XProviderOptions>) {
+  for (const [key, value] of Object.entries(process.env)) {
+    const match = key.match(/^X_TOKEN(\d*)$/);
+    if (match) {
+      if (!value) throw new Error(`Empty environment variable ${key}`);
+      const n = match[1];
+      const name = process.env[`X_ACCOUNT_NAME${n}`] ?? `X Account ${n}`;
+      const bearerToken = value;
+
+      accounts[name] = {
+        bearerToken
+      };
+    }
+  }
+}
 
 export default {
   name: packageJSON.name,
+  displayName: "X (Twitter) Integration",
   version: packageJSON.version,
   description: packageJSON.description,
   install(app, config) {
-    if (!config.social) return;
+    addAccountsFromEnv(config.x.accounts);
 
     app.services.waitForItemByType(SocialMediaService, socialService => {
-      for (const name in config.social!.providers) {
-        const provider = config.social!.providers[name];
-        if (provider.type === "x") {
-          socialService.registerSocialMediaProvider(name, new XSocialMediaProvider(XProviderOptionsSchema.parse(provider)));
-        }
+      for (const [name, accountConfig] of Object.entries(config.x.accounts)) {
+        socialService.registerSocialMediaProvider(name, new XSocialMediaProvider(accountConfig!));
       }
     });
   },

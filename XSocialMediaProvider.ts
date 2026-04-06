@@ -1,21 +1,8 @@
 import {Agent} from "@tokenring-ai/agent";
-import {HttpService} from "../utility/http/HttpService.ts";
 import {z} from "zod";
-import type {
-  CreateSocialMediaPostData,
-  SocialMediaAccount,
-  SocialMediaPost,
-  SocialMediaPostFilterOptions,
-  SocialMediaProvider,
-} from "../social/index.ts";
-
-export const XProviderOptionsSchema = z.object({
-  type: z.literal("x").default("x"),
-  baseUrl: z.string().default("https://api.x.com"),
-  bearerToken: z.string(),
-  userAgent: z.string().default("TokenRing-Writer/1.0 (https://github.com/tokenring/writer)"),
-  userId: z.string().optional(),
-});
+import type {CreateSocialMediaPostData, SocialMediaAccount, SocialMediaPost, SocialMediaPostFilterOptions, SocialMediaProvider,} from "../social/index.ts";
+import {HttpService} from "../utility/http/HttpService.ts";
+import {XProviderOptionsSchema} from "./schema.ts";
 
 type XUser = {
   id: string;
