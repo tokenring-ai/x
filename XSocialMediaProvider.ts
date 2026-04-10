@@ -1,8 +1,8 @@
-import {Agent} from "@tokenring-ai/agent";
-import {z} from "zod";
+import type {Agent} from "@tokenring-ai/agent";
+import type {z} from "zod";
 import type {CreateSocialMediaPostData, SocialMediaAccount, SocialMediaPost, SocialMediaPostFilterOptions, SocialMediaProvider,} from "../social/index.ts";
 import {HttpService} from "../utility/http/HttpService.ts";
-import {XProviderOptionsSchema} from "./schema.ts";
+import type {XProviderOptionsSchema} from "./schema.ts";
 
 type XUser = {
   id: string;
@@ -26,7 +26,9 @@ type XTweet = {
   };
 };
 
-export default class XSocialMediaProvider extends HttpService implements SocialMediaProvider {
+export default class XSocialMediaProvider
+  extends HttpService
+  implements SocialMediaProvider {
   description = "Authenticated X/Twitter social media provider";
 
   protected baseUrl: string;
@@ -34,7 +36,9 @@ export default class XSocialMediaProvider extends HttpService implements SocialM
 
   private accountPromise?: Promise<SocialMediaAccount>;
 
-  constructor(private readonly options: z.output<typeof XProviderOptionsSchema>) {
+  constructor(
+    private readonly options: z.output<typeof XProviderOptionsSchema>,
+  ) {
     super();
     this.baseUrl = options.baseUrl;
     this.defaultHeaders = {
@@ -52,7 +56,10 @@ export default class XSocialMediaProvider extends HttpService implements SocialM
     return await this.accountPromise;
   }
 
-  async getRecentPosts(filter: SocialMediaPostFilterOptions, agent: Agent): Promise<SocialMediaPost[]> {
+  async getRecentPosts(
+    filter: SocialMediaPostFilterOptions,
+    agent: Agent,
+  ): Promise<SocialMediaPost[]> {
     const account = await this.getAccount(agent);
     const params = new URLSearchParams({
       max_results: String(Math.min(filter.limit ?? 10, 100)),
@@ -72,7 +79,9 @@ export default class XSocialMediaProvider extends HttpService implements SocialM
       "X recent posts",
     );
 
-    return (response.data ?? []).map((tweet: XTweet) => this.mapTweetToPost(tweet, account));
+    return (response.data ?? []).map((tweet: XTweet) =>
+      this.mapTweetToPost(tweet, account),
+    );
   }
 
   async getPostById(id: string, agent: Agent): Promise<SocialMediaPost> {
@@ -91,11 +100,16 @@ export default class XSocialMediaProvider extends HttpService implements SocialM
     );
 
     const includedUser = response.includes?.users?.[0] as XUser | undefined;
-    const account = includedUser ? this.mapUserToAccount(includedUser) : await this.getAccount(agent);
+    const account = includedUser
+      ? this.mapUserToAccount(includedUser)
+      : await this.getAccount(agent);
     return this.mapTweetToPost(response.data, account);
   }
 
-  async createPost(data: CreateSocialMediaPostData, agent: Agent): Promise<SocialMediaPost> {
+  async createPost(
+    data: CreateSocialMediaPostData,
+    agent: Agent,
+  ): Promise<SocialMediaPost> {
     if (!data.content.trim()) throw new Error("content is required");
 
     const payload: Record<string, unknown> = {
@@ -145,8 +159,13 @@ export default class XSocialMediaProvider extends HttpService implements SocialM
     };
   }
 
-  private mapTweetToPost(tweet: XTweet, account: SocialMediaAccount): SocialMediaPost {
-    const createdAt = tweet.created_at ? new Date(tweet.created_at) : new Date();
+  private mapTweetToPost(
+    tweet: XTweet,
+    account: SocialMediaAccount,
+  ): SocialMediaPost {
+    const createdAt = tweet.created_at
+      ? new Date(tweet.created_at)
+      : new Date();
     return {
       id: tweet.id,
       platform: "x",
@@ -162,7 +181,10 @@ export default class XSocialMediaProvider extends HttpService implements SocialM
       },
       createdAt,
       publishedAt: createdAt,
-      replyToPostId: tweet.conversation_id && tweet.conversation_id !== tweet.id ? tweet.conversation_id : undefined,
+      replyToPostId:
+        tweet.conversation_id && tweet.conversation_id !== tweet.id
+          ? tweet.conversation_id
+          : undefined,
       metrics: {
         likes: tweet.public_metrics?.like_count,
         comments: tweet.public_metrics?.reply_count,
