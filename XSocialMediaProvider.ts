@@ -1,6 +1,6 @@
 import type {Agent} from "@tokenring-ai/agent";
 import type {z} from "zod";
-import type {CreateSocialMediaPostData, SocialMediaAccount, SocialMediaPost, SocialMediaPostFilterOptions, SocialMediaProvider,} from "../social/index.ts";
+import type {CreateSocialMediaPostData, SocialMediaAccount, SocialMediaPost, SocialMediaPostFilterOptions, SocialMediaProvider} from "../social/index.ts";
 import {HttpService} from "../utility/http/HttpService.ts";
 import type {XProviderOptionsSchema} from "./schema.ts";
 
