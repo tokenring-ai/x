@@ -1,12 +1,10 @@
-import {z} from "zod";
+import { z } from "zod";
 
 export const XProviderOptionsSchema = z.object({
   baseUrl: z.string().default("https://api.x.com"),
   bearerToken: z.string(),
-  userAgent: z
-    .string()
-    .default("TokenRing-Writer/1.0 (https://github.com/tokenring/writer)"),
-  userId: z.string().optional(),
+  userAgent: z.string().default("TokenRing-Writer/1.0 (https://github.com/tokenring/writer)"),
+  userId: z.string().exactOptional(),
 });
 
 export type XProviderOptions = z.input<typeof XProviderOptionsSchema>;

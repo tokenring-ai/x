@@ -1,8 +1,8 @@
-import type {TokenRingPlugin} from "@tokenring-ai/app";
-import {z} from "zod";
-import {SocialMediaService} from "../social/index.ts";
-import packageJSON from "./package.json" with {type: "json"};
-import {XConfigSchema, type XProviderOptions} from "./schema.ts";
+import type { TokenRingPlugin } from "@tokenring-ai/app";
+import { z } from "zod";
+import { SocialMediaService } from "../social/index.ts";
+import packageJSON from "./package.json" with { type: "json" };
+import { XConfigSchema, type XProviderOptions } from "./schema.ts";
 import XSocialMediaProvider from "./XSocialMediaProvider.ts";
 
 const packageConfigSchema = z.object({
@@ -35,12 +35,9 @@ export default {
   install(app, config) {
     addAccountsFromEnv(config.x.accounts);
 
-    app.services.waitForItemByType(SocialMediaService, (socialService) => {
+    app.services.waitForItemByType(SocialMediaService, socialService => {
       for (const [name, accountConfig] of Object.entries(config.x.accounts)) {
-        socialService.registerSocialMediaProvider(
-          name,
-          new XSocialMediaProvider(accountConfig),
-        );
+        socialService.registerSocialMediaProvider(name, new XSocialMediaProvider(accountConfig));
       }
     });
   },
