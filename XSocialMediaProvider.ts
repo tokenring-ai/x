@@ -1,8 +1,8 @@
 import type { Agent } from "@tokenring-ai/agent";
 import { stripUndefinedKeys } from "@tokenring-ai/utility/object/stripObject";
-import type { z } from "zod";
+import { z } from "zod";
 import type { CreateSocialMediaPostData, SocialMediaAccount, SocialMediaPost, SocialMediaPostFilterOptions, SocialMediaProvider } from "../social/index.ts";
-import { HttpService } from "../utility/http/HttpService.ts";
+import { HTTPRetriever } from "@tokenring-ai/utility/http/HTTPRetriever";
 import type { XProviderOptionsSchema } from "./schema.ts";
 
 type XUser = {
@@ -27,23 +27,86 @@ type XTweet = {
   };
 };
 
-export default class XSocialMediaProvider extends HttpService implements SocialMediaProvider {
+const XUserSchema = z
+  .object({
+    id: z.string(),
+    username: z.string(),
+    name: z.string().optional(),
+    description: z.string().optional(),
+    profile_image_url: z.string().optional(),
+  })
+  .passthrough();
+
+const XTweetSchema = z
+  .object({
+    id: z.string(),
+    text: z.string(),
+    created_at: z.string().optional(),
+    conversation_id: z.string().optional(),
+    public_metrics: z
+      .object({
+        like_count: z.number().optional(),
+        reply_count: z.number().optional(),
+        retweet_count: z.number().optional(),
+        quote_count: z.number().optional(),
+        impression_count: z.number().optional(),
+      })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+
+const XRecentPostsResponseSchema = z
+  .object({
+    data: z.array(XTweetSchema).default([]),
+  })
+  .passthrough();
+
+const XPostLookupResponseSchema = z
+  .object({
+    data: XTweetSchema,
+    includes: z
+      .object({
+        users: z.array(XUserSchema).optional(),
+      })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+
+const XCreatePostResponseSchema = z
+  .object({
+    data: z
+      .object({
+        id: z.string(),
+      })
+      .passthrough(),
+  })
+  .passthrough();
+
+const XAccountResponseSchema = z
+  .object({
+    data: XUserSchema,
+  })
+  .passthrough();
+
+export default class XSocialMediaProvider implements SocialMediaProvider {
   description = "Authenticated X/Twitter social media provider";
 
-  protected baseUrl: string;
-  protected defaultHeaders: Record<string, string>;
-
+  private readonly retriever: HTTPRetriever;
   private accountPromise?: Promise<SocialMediaAccount>;
 
   constructor(private readonly options: z.output<typeof XProviderOptionsSchema>) {
-    super();
-    this.baseUrl = options.baseUrl;
-    this.defaultHeaders = {
-      Accept: "application/json",
-      "Content-Type": "application/json",
-      "User-Agent": options.userAgent,
-      Authorization: `Bearer ${options.bearerToken}`,
-    };
+    this.retriever = new HTTPRetriever({
+      baseUrl: options.baseUrl,
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": options.userAgent,
+        Authorization: `Bearer ${options.bearerToken}`,
+      },
+      timeout: 10_000,
+    });
   }
 
   async getAccount(_agent: Agent): Promise<SocialMediaAccount> {
@@ -67,9 +130,14 @@ export default class XSocialMediaProvider extends HttpService implements SocialM
     if (filter.since) params.set("start_time", filter.since.toISOString());
     if (filter.until) params.set("end_time", filter.until.toISOString());
 
-    const response = await this.fetchJson(`/2/users/${account.id}/tweets?${params.toString()}`, { method: "GET" }, "X recent posts");
+    const response = await this.retriever.fetchValidatedJson({
+      url: `/2/users/${account.id}/tweets?${params.toString()}`,
+      opts: { method: "GET" },
+      schema: XRecentPostsResponseSchema,
+      context: "X recent posts",
+    });
 
-    return (response.data ?? []).map((tweet: XTweet) => this.mapTweetToPost(tweet, account));
+    return response.data.map(tweet => this.mapTweetToPost(tweet, account));
   }
 
   async getPostById(id: string, agent: Agent): Promise<SocialMediaPost> {
@@ -81,7 +149,12 @@ export default class XSocialMediaProvider extends HttpService implements SocialM
       "user.fields": "username,name,description,profile_image_url",
     });
 
-    const response = await this.fetchJson(`/2/tweets/${id}?${params.toString()}`, { method: "GET" }, "X post lookup");
+    const response = await this.retriever.fetchValidatedJson({
+      url: `/2/tweets/${id}?${params.toString()}`,
+      opts: { method: "GET" },
+      schema: XPostLookupResponseSchema,
+      context: "X post lookup",
+    });
 
     const includedUser = response.includes?.users?.[0] as XUser | undefined;
     const account = includedUser ? this.mapUserToAccount(includedUser) : await this.getAccount(agent);
@@ -99,27 +172,38 @@ export default class XSocialMediaProvider extends HttpService implements SocialM
       payload.reply = { in_reply_to_tweet_id: data.replyToPostId };
     }
 
-    const response = await this.fetchJson(
-      "/2/tweets",
-      {
+    const response = await this.retriever.fetchValidatedJson({
+      url: "/2/tweets",
+      opts: {
         method: "POST",
         body: JSON.stringify(payload),
       },
-      "X create post",
-    );
+      schema: XCreatePostResponseSchema,
+      context: "X create post",
+    });
 
     return await this.getPostById(response.data.id, agent);
   }
 
   private async fetchAccount(): Promise<SocialMediaAccount> {
     const response = this.options.userId
-      ? await this.fetchJson(`/2/users/${this.options.userId}?user.fields=username,name,description,profile_image_url`, { method: "GET" }, "X account lookup")
-      : await this.fetchJson("/2/users/me?user.fields=username,name,description,profile_image_url", { method: "GET" }, "X current account lookup");
+      ? await this.retriever.fetchValidatedJson({
+          url: `/2/users/${this.options.userId}?user.fields=username,name,description,profile_image_url`,
+          opts: { method: "GET" },
+          schema: XAccountResponseSchema,
+          context: "X account lookup",
+        })
+      : await this.retriever.fetchValidatedJson({
+          url: "/2/users/me?user.fields=username,name,description,profile_image_url",
+          opts: { method: "GET" },
+          schema: XAccountResponseSchema,
+          context: "X current account lookup",
+        });
 
     return this.mapUserToAccount(response.data);
   }
 
-  private mapUserToAccount(user: XUser): SocialMediaAccount {
+  private mapUserToAccount(user: z.output<typeof XUserSchema>): SocialMediaAccount {
     return stripUndefinedKeys({
       id: user.id,
       username: user.username,
@@ -130,7 +214,7 @@ export default class XSocialMediaProvider extends HttpService implements SocialM
     });
   }
 
-  private mapTweetToPost(tweet: XTweet, account: SocialMediaAccount): SocialMediaPost {
+  private mapTweetToPost(tweet: z.output<typeof XTweetSchema>, account: SocialMediaAccount): SocialMediaPost {
     const createdAt = tweet.created_at ? new Date(tweet.created_at) : new Date();
 
     return {
