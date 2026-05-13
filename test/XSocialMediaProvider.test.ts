@@ -1,6 +1,6 @@
-import {beforeEach, describe, expect, it, vi} from "vitest";
-import {doFetchWithRetry} from "../../utility/http/doFetchWithRetry.ts";
-import {XProviderOptionsSchema} from "../schema";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { doFetchWithRetry } from "../../utility/http/doFetchWithRetry.ts";
+import { XProviderOptionsSchema } from "../schema";
 import XSocialMediaProvider from "../XSocialMediaProvider.ts";
 
 vi.mock("../../utility/http/doFetchWithRetry.ts", () => ({
@@ -99,7 +99,7 @@ describe("XSocialMediaProvider", () => {
   it("creates a post and reloads it", async () => {
     vi.mocked(doFetchWithRetry)
       .mockResolvedValueOnce(jsonResponse({
-        data: {id: "tweet-9", text: "new post"},
+        data: { id: "tweet-9", text: "new post" },
       }))
       .mockResolvedValueOnce(jsonResponse({
         data: {
@@ -122,7 +122,7 @@ describe("XSocialMediaProvider", () => {
       bearerToken: "secret",
     }));
 
-    const post = await provider.createPost({content: "new post"}, mockAgent);
+    const post = await provider.createPost({ content: "new post" }, mockAgent);
 
     expect(post.id).toBe("tweet-9");
     expect(post.content).toBe("new post");
@@ -131,7 +131,7 @@ describe("XSocialMediaProvider", () => {
       expect.stringContaining("/2/tweets"),
       expect.objectContaining({
         method: "POST",
-        body: JSON.stringify({text: "new post"}),
+        body: JSON.stringify({ text: "new post" }),
       }),
     );
   });

@@ -1,8 +1,8 @@
 import type { Agent } from "@tokenring-ai/agent";
+import { HTTPRetriever } from "@tokenring-ai/utility/http/HTTPRetriever";
 import { stripUndefinedKeys } from "@tokenring-ai/utility/object/stripObject";
 import { z } from "zod";
 import type { CreateSocialMediaPostData, SocialMediaAccount, SocialMediaPost, SocialMediaPostFilterOptions, SocialMediaProvider } from "../social/index.ts";
-import { HTTPRetriever } from "@tokenring-ai/utility/http/HTTPRetriever";
 import type { XProviderOptionsSchema } from "./schema.ts";
 
 type XUser = {
