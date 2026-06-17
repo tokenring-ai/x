@@ -35,7 +35,7 @@ const XUserSchema = z
     description: z.string().optional(),
     profile_image_url: z.string().optional(),
   })
-  .passthrough();
+  .loose();
 
 const XTweetSchema = z
   .object({
@@ -51,16 +51,16 @@ const XTweetSchema = z
         quote_count: z.number().optional(),
         impression_count: z.number().optional(),
       })
-      .passthrough()
+      .loose()
       .optional(),
   })
-  .passthrough();
+  .loose();
 
 const XRecentPostsResponseSchema = z
   .object({
     data: z.array(XTweetSchema).default([]),
   })
-  .passthrough();
+  .loose();
 
 const XPostLookupResponseSchema = z
   .object({
@@ -69,10 +69,10 @@ const XPostLookupResponseSchema = z
       .object({
         users: z.array(XUserSchema).optional(),
       })
-      .passthrough()
+      .loose()
       .optional(),
   })
-  .passthrough();
+  .loose();
 
 const XCreatePostResponseSchema = z
   .object({
@@ -80,15 +80,15 @@ const XCreatePostResponseSchema = z
       .object({
         id: z.string(),
       })
-      .passthrough(),
+      .loose(),
   })
-  .passthrough();
+  .loose();
 
 const XAccountResponseSchema = z
   .object({
     data: XUserSchema,
   })
-  .passthrough();
+  .loose();
 
 export default class XSocialMediaProvider implements SocialMediaProvider {
   description = "Authenticated X/Twitter social media provider";
