@@ -220,7 +220,7 @@ export default class XSocialMediaProvider implements SocialMediaProvider {
     return {
       id: tweet.id,
       platform: "x",
-      content: tweet.text ?? "",
+      content: tweet.text,
       status: "published",
       url: `https://x.com/${account.username}/status/${tweet.id}`,
       author: stripUndefinedKeys({
