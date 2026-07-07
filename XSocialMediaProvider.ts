@@ -13,7 +13,7 @@ type XUser = {
   profile_image_url?: string | undefined;
 };
 
-type XTweet = {
+/*type XTweet = {
   id: string;
   text: string;
   created_at?: string | undefined;
@@ -25,7 +25,7 @@ type XTweet = {
     quote_count?: number | undefined;
     impression_count?: number | undefined;
   };
-};
+};*/
 
 const XUserSchema = z
   .object({
