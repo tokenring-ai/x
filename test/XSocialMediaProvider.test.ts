@@ -87,9 +87,9 @@ describe("XSocialMediaProvider", () => {
     }, mockAgent);
 
     expect(posts).toHaveLength(1);
-    expect(posts[0].id).toBe("tweet-1");
-    expect(posts[0].author.username).toBe("tokenring");
-    expect(posts[0].metrics?.shares).toBe(4);
+    expect(posts[0]!.id).toBe("tweet-1");
+    expect(posts[0]!.author.username).toBe("tokenring");
+    expect(posts[0]!.metrics?.shares).toBe(4);
     expect(doFetchWithRetry).toHaveBeenLastCalledWith(
       expect.stringContaining("exclude=replies%2Cretweets"),
       expect.any(Object),
