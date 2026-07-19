@@ -2,7 +2,7 @@ import { z } from "zod";
 
 export const XProviderOptionsSchema = z.object({
   baseUrl: z.string().default("https://api.x.com"),
-  bearerToken: z.string(),
+  bearerToken: z.string().meta({ sensitive: true, description: "X (Twitter) API bearer token" }),
   userAgent: z.string().default("TokenRing-Writer/1.0 (https://github.com/tokenring/writer)"),
   userId: z.string().exactOptional(),
 });
