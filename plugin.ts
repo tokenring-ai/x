@@ -1,45 +1,38 @@
+import { AgentCommandService } from "@tokenring-ai/agent";
 import type { TokenRingPlugin } from "@tokenring-ai/app";
+import { requireSecret } from "@tokenring-ai/secrets/SecretService";
 import { z } from "zod";
-import { SocialMediaService } from "../social/index.ts";
+import agentCommands from "./commands.ts";
 import packageJSON from "./package.json" with { type: "json" };
-import { XConfigSchema, type XProviderOptions } from "./schema.ts";
-import XSocialMediaProvider from "./XSocialMediaProvider.ts";
+import { type ResolvedXAccountConfig, XServiceConfigSchema } from "./schema.ts";
+import XService from "./XService.ts";
 
 const packageConfigSchema = z.object({
-  x: XConfigSchema.prefault({
-    accounts: {},
-  }),
+  x: XServiceConfigSchema.prefault({ accounts: {} }),
 });
-
-function addAccountsFromEnv(accounts: Record<string, XProviderOptions>) {
-  for (const [key, value] of Object.entries(process.env)) {
-    const match = key.match(/^X_TOKEN(\d*)$/);
-    if (match) {
-      if (!value) throw new Error(`Empty environment variable ${key}`);
-      const n = match[1];
-      const name = process.env[`X_ACCOUNT_NAME${n}`] ?? `X Account ${n}`;
-      const bearerToken = value;
-
-      accounts[name] = {
-        bearerToken,
-      };
-    }
-  }
-}
 
 export default {
   name: packageJSON.name,
   displayName: "X (Twitter) Integration",
   version: packageJSON.version,
   description: packageJSON.description,
-  install(app, config) {
-    addAccountsFromEnv(config.x.accounts);
-
-    app.services.waitForItemByType(SocialMediaService, socialService => {
-      for (const [name, accountConfig] of Object.entries(config.x.accounts)) {
-        socialService.registerSocialMediaProvider(name, new XSocialMediaProvider(accountConfig));
-      }
+  install(app) {
+    app.addService(new XService(app));
+    app.waitForService(AgentCommandService, commandService => {
+      commandService.addAgentCommands(agentCommands);
     });
   },
-  config: packageConfigSchema,
+  async reconfigure(app, config) {
+    // Resolve up front so a misconfigured token fails at configure, not on first poll.
+    const resolvedAccounts: Record<string, ResolvedXAccountConfig> = {};
+    for (const [accountName, account] of Object.entries(config.x.accounts)) {
+      resolvedAccounts[accountName] = {
+        ...account,
+        accessToken: requireSecret(app, account.accessToken, `X account "${accountName}" access token`),
+      };
+    }
+
+    await app.requireService(XService).reconfigure({ accounts: resolvedAccounts });
+  },
+  configSchema: packageConfigSchema,
 } satisfies TokenRingPlugin<typeof packageConfigSchema>;

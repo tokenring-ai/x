@@ -1,17 +1,20 @@
 {
   "name": "@tokenring-ai/x",
+  "description": "X (Twitter) transport for TokenRing bots.",
   "version": "0.2.0",
-  "description": "X/Twitter social media provider for Token Ring",
   "dependencies": {
-    "@tokenring-ai/agent": "workspace:*",
     "@tokenring-ai/app": "workspace:*",
+    "@tokenring-ai/agent": "workspace:*",
     "@tokenring-ai/utility": "workspace:*",
+    "@tokenring-ai/bot": "workspace:*",
+    "@tokenring-ai/secrets": "workspace:*",
     "zod": "^4.4.3"
   },
   "exports": {
     ".": "./index.ts",
     "./*": "./*.ts"
   },
+  "types": "./index.ts",
   "license": "MIT",
   "type": "module",
   "devDependencies": {

@@ -1,3 +1,10 @@
-export type { XConfig, XProviderOptions } from "./schema.ts";
-export { XConfigSchema, XProviderOptionsSchema } from "./schema.ts";
-export { default as XSocialMediaProvider } from "./XSocialMediaProvider.ts";
+export {
+  type ParsedXAccountConfig,
+  type ParsedXServiceConfig,
+  type ResolvedXAccountConfig,
+  type ResolvedXServiceConfig,
+  XAccountConfigSchema,
+  XServiceConfigSchema,
+} from "./schema.ts";
+export { default as XMessagingProvider } from "./XMessagingProvider.ts";
+export { default as XService } from "./XService.ts";
