@@ -409,7 +409,7 @@ export default class XMessagingProvider implements MessagingProvider {
         userName: author ? displayName(author) : tweet.author_id,
         text: this.stripOwnMention(tweet.text),
         messageId: tweet.id,
-        replyToMessageId: replyTo ?? tweet.id,
+        replyToMessageId: replyTo,
         hasAttachments: false,
         // Public mentions are treated as DMs for bot authorization: the bot's
         // directMessages policy (listed / anyone / none) governs who may talk,
