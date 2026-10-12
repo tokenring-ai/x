@@ -237,6 +237,21 @@ export default class XMessagingProvider implements MessagingProvider {
     return this.post(conversationId, text, options);
   }
 
+  /**
+   * Publishes a public post on this account. `replyToTweetId` makes it a reply
+   * instead of a new post. Bot conversation sends go through sendMessage.
+   */
+  async createPost(text: string, replyToTweetId?: string): Promise<string> {
+    const body = text.trim();
+    if (!body) throw new Error("text is required");
+    if (body.length > this.maxMessageLength) {
+      throw new Error(`text is longer than this account's limit of ${this.maxMessageLength} characters`);
+    }
+    const reply = replyToTweetId?.trim();
+    if (replyToTweetId != null && !reply) throw new Error("replyToTweetId is empty");
+    return this.createTweet(body, reply || undefined);
+  }
+
   async updateMessage(conversationId: string, messageId: string, text: string): Promise<string> {
     if (messageId.startsWith(PENDING_PREFIX)) {
       const pending = this.pending.get(messageId);

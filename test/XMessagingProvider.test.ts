@@ -1,10 +1,15 @@
-import { beforeEach, describe, expect, it, mock } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import type Agent from "@tokenring-ai/agent/Agent";
 import type TokenRingApp from "@tokenring-ai/app";
-import type { IncomingMessage } from "@tokenring-ai/bot";
+import createTestingApp from "@tokenring-ai/app/test/createTestingApp.test";
+import { BotService, type IncomingMessage } from "@tokenring-ai/bot";
+import ChatService, { type CheckToolApprovalOptions } from "@tokenring-ai/chat/ChatService";
 import { doFetchWithRetry } from "../../utility/http/doFetchWithRetry.ts";
+import plugin from "../plugin.ts";
 import { type ResolvedXAccountConfig, XAccountConfigSchema } from "../schema.ts";
+import createPostTool from "../tools/createPost.ts";
 import XMessagingProvider from "../XMessagingProvider.ts";
-import type XService from "../XService.ts";
+import XService from "../XService.ts";
 
 void mock.module("../../utility/http/doFetchWithRetry.ts", () => ({
   doFetchWithRetry: mock(),
@@ -205,5 +210,187 @@ describe("XMessagingProvider", () => {
       }),
     );
     await provider.stop();
+  });
+
+  it("creates a standalone post without a reply target", async () => {
+    const provider = await startProvider();
+    (doFetchWithRetry as ReturnType<typeof mock>).mockResolvedValueOnce(jsonResponse({ data: { id: "tweet-1", text: "hello" } }));
+
+    const id = await provider.createPost("  hello  ");
+    expect(id).toBe("tweet-1");
+    expect(lastFetchCall().url).toContain("/2/tweets");
+    expect(lastFetchCall().opts).toEqual(
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ text: "hello" }),
+        headers: expect.objectContaining({ Authorization: "Bearer secret-token" }),
+      }),
+    );
+    await provider.stop();
+  });
+
+  it("creates a post as a reply when a tweet id is given", async () => {
+    const provider = await startProvider();
+    (doFetchWithRetry as ReturnType<typeof mock>).mockResolvedValueOnce(jsonResponse({ data: { id: "tweet-2", text: "reply" } }));
+
+    const id = await provider.createPost("reply", "42");
+    expect(id).toBe("tweet-2");
+    expect(lastFetchCall().opts).toEqual(
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ text: "reply", reply: { in_reply_to_tweet_id: "42" } }),
+      }),
+    );
+    await provider.stop();
+  });
+
+  it("does not call the API for an empty or too-long post", async () => {
+    const provider = await startProvider();
+    const calls = (doFetchWithRetry as ReturnType<typeof mock>).mock.calls.length;
+
+    await expect(provider.createPost("  ")).rejects.toThrow(/text is required/);
+    await expect(provider.createPost("x".repeat(provider.maxMessageLength + 1))).rejects.toThrow(/longer than this account's limit/);
+    expect((doFetchWithRetry as ReturnType<typeof mock>).mock.calls.length).toBe(calls);
+    await provider.stop();
+  });
+});
+
+describe("X createPost", () => {
+  let x: XService | undefined;
+
+  afterEach(async () => {
+    await x?.stop();
+    x = undefined;
+    // Drop the URL-routed fetch stub so it cannot leak into other test files.
+    fetchMock().mockReset();
+  });
+
+  function fetchMock() {
+    return doFetchWithRetry as ReturnType<typeof mock>;
+  }
+
+  function tweetPosts() {
+    return fetchMock().mock.calls.filter(call => String(call[0]).includes("/2/tweets") && (call[1] as { method?: string } | undefined)?.method === "POST");
+  }
+
+  function agentFor(service: XService, approve: boolean) {
+    const checkToolApproval = mock<(request: CheckToolApprovalOptions, agent: Agent) => Promise<boolean>>(async () => approve);
+    const services = new Map<unknown, unknown>([
+      [XService, service],
+      [ChatService, { checkToolApproval }],
+    ]);
+    const agent = {
+      infoMessage: mock(),
+      requireService: (cls: unknown) => {
+        const serviceImpl = services.get(cls);
+        if (!serviceImpl) throw new Error("service not stubbed");
+        return serviceImpl;
+      },
+    } as unknown as Agent;
+    return { agent, checkToolApproval };
+  }
+
+  async function connect(accounts: Record<string, ResolvedXAccountConfig> = { x: parsedAccount() }) {
+    const app = createTestingApp();
+    app.addService(BotService, {
+      registerProvider() {},
+      unregisterProvider() {},
+    } as unknown as BotService);
+
+    fetchMock().mockReset();
+    fetchMock().mockImplementation(async (url: string | URL) => {
+      const href = String(url);
+      if (href.includes("/2/users/me")) return jsonResponse({ data: { id: "99", username: "tokenring", name: "Token Ring" } });
+      if (href.includes("/mentions") || href.includes("/2/dm_events")) return jsonResponse({ data: [], meta: {} });
+      if (href.includes("/2/tweets")) return jsonResponse({ data: { id: "tweet-1", text: "hello" } });
+      throw new Error(`unexpected X request ${href}`);
+    });
+
+    x = new XService(app);
+    await x.reconfigure({ accounts });
+    return x;
+  }
+
+  it("rejects empty text before any request", async () => {
+    fetchMock().mockReset();
+    const service = new XService(createTestingApp());
+    await expect(service.createPost("  ")).rejects.toThrow(/text is required/);
+    expect(fetchMock()).not.toHaveBeenCalled();
+  });
+
+  it("posts through the named account's existing client", async () => {
+    const service = await connect();
+    const post = await service.createPost("hello there", { replyToTweetId: "42" });
+    expect(post).toEqual({ id: "tweet-1", account: "x" });
+    expect(tweetPosts()).toHaveLength(1);
+    expect(tweetPosts()[0]?.[1]).toEqual(
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ text: "hello there", reply: { in_reply_to_tweet_id: "42" } }),
+        headers: expect.objectContaining({ Authorization: "Bearer secret-token" }),
+      }),
+    );
+  });
+
+  it("x_createPost posts only after approval", async () => {
+    const service = await connect();
+    const { agent, checkToolApproval } = agentFor(service, true);
+    const result = await createPostTool.execute({ text: "hello there" }, agent);
+
+    expect(checkToolApproval).toHaveBeenCalledTimes(1);
+    expect(checkToolApproval.mock.calls[0]?.[0]).toMatchObject({
+      toolName: "x_createPost",
+      default: false,
+      safetyLevel: 7,
+    });
+    expect(String(checkToolApproval.mock.calls[0]![0].detailedDescription)).toContain("hello there");
+    expect(result.result).toContain("tweet-1");
+    expect(tweetPosts()).toHaveLength(1);
+    expect(tweetPosts()[0]?.[1]).toEqual(expect.objectContaining({ body: JSON.stringify({ text: "hello there" }) }));
+  });
+
+  it("declined approval does not post", async () => {
+    const service = await connect();
+    const { agent, checkToolApproval } = agentFor(service, false);
+
+    await expect(createPostTool.execute({ text: "hello there", replyToTweetId: "42" }, agent)).rejects.toThrow(/did not approve/);
+    expect(checkToolApproval).toHaveBeenCalledTimes(1);
+    expect(tweetPosts()).toHaveLength(0);
+  });
+
+  it("does not ask for approval or post when the text is empty or too long", async () => {
+    const service = await connect();
+    const { agent, checkToolApproval } = agentFor(service, true);
+
+    await expect(createPostTool.execute({ text: "  " }, agent)).rejects.toThrow(/text is required/);
+    await expect(createPostTool.execute({ text: "x".repeat(281) }, agent)).rejects.toThrow(/longer than the x account limit of 280/);
+    expect(checkToolApproval).not.toHaveBeenCalled();
+    expect(tweetPosts()).toHaveLength(0);
+  });
+
+  it("requires an account name when more than one is connected", async () => {
+    const service = await connect({ primary: parsedAccount(), support: parsedAccount() });
+    const { agent, checkToolApproval } = agentFor(service, true);
+
+    await expect(createPostTool.execute({ text: "hello" }, agent)).rejects.toThrow(/Multiple X accounts/);
+    expect(checkToolApproval).not.toHaveBeenCalled();
+    expect(tweetPosts()).toHaveLength(0);
+
+    const result = await createPostTool.execute({ text: "hello", account: "support", replyToTweetId: "42" }, agent);
+    expect(result.result).toContain("as support");
+    expect(tweetPosts()).toHaveLength(1);
+  });
+
+  it("registers x_createPost with chat", () => {
+    const addTools = mock((tools: { name: string }[]) => tools);
+    const app = {
+      addService: mock(),
+      waitForService: (_type: unknown, callback: (service: unknown) => void) => {
+        callback({ addTools, addAgentCommands: mock() });
+      },
+    };
+    plugin.install(app as unknown as TokenRingApp);
+    expect(addTools).toHaveBeenCalledTimes(1);
+    expect(addTools.mock.calls[0]![0].map(tool => tool.name)).toEqual(["x_createPost"]);
   });
 });

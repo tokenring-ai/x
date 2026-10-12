@@ -6,13 +6,19 @@ import { deepEquals } from "bun";
 import type { ResolvedXServiceConfig } from "./schema.ts";
 import XMessagingProvider from "./XMessagingProvider.ts";
 
+export type XCreatedPost = {
+  id: string;
+  account: string;
+};
+
 /**
  * Connects the configured X accounts and registers each one with the bot
  * service, where it becomes the `x`-style prefix of a `service:userId` target.
+ * Also publishes standalone posts through those accounts' existing API clients.
  */
 export default class XService implements TokenRingService {
   readonly name = "XService";
-  description = "Connects X (Twitter) accounts to the bot service.";
+  description = "Connects X (Twitter) accounts to the bot service and can publish posts.";
 
   private providers = new KeyedRegistry<XMessagingProvider>();
   private options: ResolvedXServiceConfig = { accounts: {} };
@@ -54,6 +60,31 @@ export default class XService implements TokenRingService {
       },
     });
     this.options = options;
+  }
+
+  /**
+   * Picks the connected account a post should come from. A single connected
+   * account is used when the caller does not name one.
+   */
+  resolveAccountName(accountName?: string): string {
+    const names = this.providers.keysArray();
+    if (accountName) {
+      if (!this.providers.get(accountName)) {
+        throw new Error(`X account "${accountName}" is not connected. Connected accounts: ${names.join(", ") || "(none)"}`);
+      }
+      return accountName;
+    }
+    if (names.length === 1) return names[0]!;
+    if (names.length === 0) throw new Error("No X account is connected");
+    throw new Error(`Multiple X accounts are connected (${names.join(", ")}). Pass an account name.`);
+  }
+
+  /** Publishes a post (or a reply) through the named account's existing API client. */
+  async createPost(text: string, options: { account?: string; replyToTweetId?: string } = {}): Promise<XCreatedPost> {
+    if (!text.trim()) throw new Error("text is required");
+    const account = this.resolveAccountName(options.account);
+    const id = await this.providers.require(account).createPost(text, options.replyToTweetId);
+    return { id, account };
   }
 
   async stop(): Promise<void> {

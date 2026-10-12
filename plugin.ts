@@ -1,10 +1,12 @@
 import { AgentCommandService } from "@tokenring-ai/agent";
 import type { TokenRingPlugin } from "@tokenring-ai/app";
+import { ChatService } from "@tokenring-ai/chat";
 import { requireSecret } from "@tokenring-ai/secrets/SecretService";
 import { z } from "zod";
 import agentCommands from "./commands.ts";
 import packageJSON from "./package.json" with { type: "json" };
 import { type ResolvedXAccountConfig, XServiceConfigSchema } from "./schema.ts";
+import tools from "./tools.ts";
 import XService from "./XService.ts";
 
 const packageConfigSchema = z.object({
@@ -21,6 +23,8 @@ export default {
     app.waitForService(AgentCommandService, commandService => {
       commandService.addAgentCommands(agentCommands);
     });
+
+    app.waitForService(ChatService, chatService => chatService.addTools(tools));
   },
   async reconfigure(app, config) {
     // Resolve up front so a misconfigured token fails at configure, not on first poll.
