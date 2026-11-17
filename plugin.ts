@@ -1,10 +1,12 @@
 import { AgentCommandService } from "@tokenring-ai/agent";
 import type { TokenRingPlugin } from "@tokenring-ai/app";
 import { ChatService } from "@tokenring-ai/chat";
+import { RpcService } from "@tokenring-ai/rpc";
 import { requireSecret } from "@tokenring-ai/secrets/SecretService";
 import { z } from "zod";
 import agentCommands from "./commands.ts";
 import packageJSON from "./package.json" with { type: "json" };
+import xRPC from "./rpc/x.ts";
 import { type ResolvedXAccountConfig, XServiceConfigSchema } from "./schema.ts";
 import tools from "./tools.ts";
 import XService from "./XService.ts";
@@ -25,6 +27,7 @@ export default {
     });
 
     app.waitForService(ChatService, chatService => chatService.addTools(tools));
+    app.waitForService(RpcService, rpcService => rpcService.registerEndpoint(xRPC));
   },
   async reconfigure(app, config) {
     // Resolve up front so a misconfigured token fails at configure, not on first poll.

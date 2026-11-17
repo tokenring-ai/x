@@ -1,14 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import type Agent from "@tokenring-ai/agent/Agent";
 import type TokenRingApp from "@tokenring-ai/app";
 import createTestingApp from "@tokenring-ai/app/test/createTestingApp.test";
 import { BotService, type IncomingMessage } from "@tokenring-ai/bot";
 import ChatService, { type CheckToolApprovalOptions } from "@tokenring-ai/chat/ChatService";
 import { doFetchWithRetry } from "../../utility/http/doFetchWithRetry.ts";
+import ProviderStateFile from "../ProviderStateFile.ts";
 import plugin from "../plugin.ts";
 import { type ResolvedXAccountConfig, XAccountConfigSchema } from "../schema.ts";
 import createPostTool from "../tools/createPost.ts";
-import XMessagingProvider from "../XMessagingProvider.ts";
+import XMessagingProvider, { XCursorStateSchema } from "../XMessagingProvider.ts";
 import XService from "../XService.ts";
 
 void mock.module("../../utility/http/doFetchWithRetry.ts", () => ({
@@ -129,7 +133,7 @@ describe("XMessagingProvider", () => {
     await provider.stop();
   });
 
-  it("delivers polled mentions to handlers as direct, addressed messages", async () => {
+  it("delivers polled mentions as addressed channel traffic, answered under the mention itself", async () => {
     const provider = await startProvider({ ...parsedAccount(), pollDirectMessages: false });
     const received: IncomingMessage[] = [];
     provider.onMessage(message => {
@@ -163,9 +167,13 @@ describe("XMessagingProvider", () => {
         conversationId: "tweet:t-1",
         userId: "55",
         userName: "Alice (@alice)",
+        roomId: "mentions",
         text: "please help",
         messageId: "t-2",
-        direct: true,
+        // The parent is t-1 (someone else's post); the answer goes under the mention itself.
+        replyToMessageId: "t-1",
+        replyTarget: "t-2",
+        direct: false,
         addressed: true,
       }),
     );
@@ -251,6 +259,179 @@ describe("XMessagingProvider", () => {
     await expect(provider.createPost("  ")).rejects.toThrow(/text is required/);
     await expect(provider.createPost("x".repeat(provider.maxMessageLength + 1))).rejects.toThrow(/longer than this account's limit/);
     expect((doFetchWithRetry as ReturnType<typeof mock>).mock.calls.length).toBe(calls);
+    await provider.stop();
+  });
+});
+
+function mentionsPage(tweets: Array<{ id: string; text?: string; author_id?: string; replied_to?: string }>, nextToken?: string) {
+  return jsonResponse({
+    data: tweets.map(tweet => ({
+      id: tweet.id,
+      text: tweet.text ?? "@tokenring hi",
+      author_id: tweet.author_id ?? "55",
+      conversation_id: "c-1",
+      ...(tweet.replied_to ? { referenced_tweets: [{ type: "replied_to", id: tweet.replied_to }] } : {}),
+    })),
+    includes: { users: [{ id: "55", username: "alice" }] },
+    meta: { result_count: tweets.length, ...(nextToken ? { next_token: nextToken } : {}) },
+  });
+}
+
+function poll(provider: XMessagingProvider) {
+  return (provider as unknown as { poll(): Promise<void> }).poll();
+}
+
+function mentionsOnly() {
+  return parsedAccount({ pollDirectMessages: false });
+}
+
+describe("XMessagingProvider polling", () => {
+  let dir: string;
+
+  beforeEach(() => {
+    mock.clearAllMocks();
+    (doFetchWithRetry as ReturnType<typeof mock>).mockReset();
+    dir = mkdtempSync(path.join(tmpdir(), "x-cursors-"));
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  function stateFile() {
+    return new ProviderStateFile(path.join(dir, "x.json"), XCursorStateSchema);
+  }
+
+  async function start(account: ResolvedXAccountConfig, file = stateFile(), seed?: Response | Error) {
+    const fetch = doFetchWithRetry as ReturnType<typeof mock>;
+    fetch.mockResolvedValueOnce(jsonResponse({ data: { id: "99", username: "tokenring" } }));
+    if (seed instanceof Error) fetch.mockRejectedValueOnce(seed);
+    else if (seed) fetch.mockResolvedValueOnce(seed);
+    const provider = new XMessagingProvider(mockApp(), mockService(), "x", account, file);
+    await provider.start();
+    return provider;
+  }
+
+  it("answers a reply to one of our own posts under that post, so outreach threads still match", async () => {
+    const provider = await start(mentionsOnly(), stateFile(), jsonResponse({ data: [], meta: {} }));
+    const fetch = doFetchWithRetry as ReturnType<typeof mock>;
+    fetch.mockResolvedValueOnce(jsonResponse({ data: { id: "500" } }));
+    await provider.sendMessage("tweet:c-1", "question for you");
+
+    const received: IncomingMessage[] = [];
+    provider.onMessage(message => {
+      received.push(message);
+    });
+    fetch.mockResolvedValueOnce(mentionsPage([{ id: "501", text: "the answer", replied_to: "500" }]));
+    await poll(provider);
+
+    expect(received[0]).toEqual(expect.objectContaining({ messageId: "501", replyToMessageId: "500", addressed: true, direct: false }));
+    await provider.stop();
+  });
+
+  it("does not deliver anything until the mentions cursor is seeded, retrying a failed seed", async () => {
+    const provider = await start(mentionsOnly(), stateFile(), new Error("seed down"));
+    const received: IncomingMessage[] = [];
+    provider.onMessage(message => {
+      received.push(message);
+    });
+    const fetch = doFetchWithRetry as ReturnType<typeof mock>;
+
+    // The next poll seeds instead of delivering the newest page of old mentions.
+    fetch.mockResolvedValueOnce(mentionsPage([{ id: "300" }, { id: "200" }]));
+    await poll(provider);
+    expect(received).toHaveLength(0);
+    expect(fetchCall(fetch.mock.calls.length - 1).url).toContain("max_results=5");
+
+    fetch.mockResolvedValueOnce(mentionsPage([{ id: "301" }]));
+    await poll(provider);
+    expect(fetchCall(fetch.mock.calls.length - 1).url).toContain("since_id=300");
+    expect(received.map(message => message.messageId)).toEqual(["301"]);
+    await provider.stop();
+  });
+
+  it("follows next_token so a burst larger than one page is delivered whole, oldest first", async () => {
+    const file = stateFile();
+    const provider = await start(mentionsOnly(), file, mentionsPage([{ id: "100" }]));
+    const received: IncomingMessage[] = [];
+    provider.onMessage(message => {
+      received.push(message);
+    });
+    const fetch = doFetchWithRetry as ReturnType<typeof mock>;
+    fetch.mockResolvedValueOnce(mentionsPage([{ id: "104" }, { id: "103" }], "page-2")).mockResolvedValueOnce(mentionsPage([{ id: "102" }, { id: "101" }]));
+
+    await poll(provider);
+    expect(fetchCall(fetch.mock.calls.length - 1).url).toContain("pagination_token=page-2");
+    expect(received.map(message => message.messageId)).toEqual(["101", "102", "103", "104"]);
+    expect(file.load()?.sinceMentionId).toBe("104");
+    await provider.stop();
+  });
+
+  it("stops mid-poll without delivering the rest or moving the cursor past them", async () => {
+    const file = stateFile();
+    const provider = await start(mentionsOnly(), file, mentionsPage([{ id: "100" }]));
+    const received: IncomingMessage[] = [];
+    provider.onMessage(async message => {
+      received.push(message);
+      await provider.stop();
+    });
+    (doFetchWithRetry as ReturnType<typeof mock>).mockResolvedValueOnce(mentionsPage([{ id: "103" }, { id: "102" }, { id: "101" }]));
+
+    await poll(provider);
+    expect(received.map(message => message.messageId)).toEqual(["101"]);
+    expect(file.load()?.sinceMentionId).toBe("101");
+  });
+
+  it("resumes from the saved cursors after a restart instead of reseeding", async () => {
+    const file = stateFile();
+    const first = await start(mentionsOnly(), file, mentionsPage([{ id: "100" }]));
+    await first.stop();
+
+    // No seed request this time: the saved cursor is used, so downtime mentions are delivered.
+    const second = await start(mentionsOnly(), file);
+    const received: IncomingMessage[] = [];
+    second.onMessage(message => {
+      received.push(message);
+    });
+    const fetch = doFetchWithRetry as ReturnType<typeof mock>;
+    fetch.mockResolvedValueOnce(mentionsPage([{ id: "150" }]));
+    await poll(second);
+
+    expect(fetchCall(fetch.mock.calls.length - 1).url).toContain("since_id=100");
+    expect(received.map(message => message.messageId)).toEqual(["150"]);
+    await second.stop();
+  });
+
+  it("pages DM events back to the cursor and advances it per event", async () => {
+    const file = stateFile();
+    const dmPage = (ids: string[], nextToken?: string) =>
+      jsonResponse({
+        data: ids.map(id => ({ id, event_type: "MessageCreate", text: `dm ${id}`, sender_id: "55", dm_conversation_id: "55-99" })),
+        meta: nextToken ? { next_token: nextToken } : {},
+      });
+    const provider = await start(parsedAccount({ pollMentions: false }), file, dmPage(["100"]));
+    const received: IncomingMessage[] = [];
+    provider.onMessage(message => {
+      received.push(message);
+    });
+    (doFetchWithRetry as ReturnType<typeof mock>)
+      .mockResolvedValueOnce(dmPage(["103", "102"], "older"))
+      .mockResolvedValueOnce(dmPage(["101", "100", "99"], "even-older"));
+
+    await poll(provider);
+    expect(received.map(message => message.messageId)).toEqual(["101", "102", "103"]);
+    expect(file.load()?.sinceDmEventId).toBe("103");
+    await provider.stop();
+  });
+
+  it("sends posts and DMs without retrying server errors", async () => {
+    const provider = await start(mentionsOnly(), stateFile(), jsonResponse({ data: [], meta: {} }));
+    const fetch = doFetchWithRetry as ReturnType<typeof mock>;
+    fetch.mockResolvedValueOnce(jsonResponse({ data: { id: "1" } })).mockResolvedValueOnce(jsonResponse({ data: { dm_event_id: "2" } }));
+    await provider.sendMessage("tweet:c-1", "public");
+    expect(fetch.mock.calls.at(-1)?.[2]).toEqual({ idempotent: false });
+    await provider.sendMessage("dm:with:55", "private");
+    expect(fetch.mock.calls.at(-1)?.[2]).toEqual({ idempotent: false });
     await provider.stop();
   });
 });
@@ -341,7 +522,7 @@ describe("X createPost", () => {
     expect(checkToolApproval.mock.calls[0]?.[0]).toMatchObject({
       toolName: "x_createPost",
       default: false,
-      safetyLevel: 7,
+      safetyLevel: 8,
     });
     expect(String(checkToolApproval.mock.calls[0]![0].detailedDescription)).toContain("hello there");
     expect(result.result).toContain("tweet-1");
@@ -381,16 +562,16 @@ describe("X createPost", () => {
     expect(tweetPosts()).toHaveLength(1);
   });
 
-  it("registers x_createPost with chat", () => {
+  it("registers x_createPost and x_schedulePost with chat", () => {
     const addTools = mock((tools: { name: string }[]) => tools);
     const app = {
       addService: mock(),
       waitForService: (_type: unknown, callback: (service: unknown) => void) => {
-        callback({ addTools, addAgentCommands: mock() });
+        callback({ addTools, addAgentCommands: mock(), registerEndpoint: mock() });
       },
     };
     plugin.install(app as unknown as TokenRingApp);
     expect(addTools).toHaveBeenCalledTimes(1);
-    expect(addTools.mock.calls[0]![0].map(tool => tool.name)).toEqual(["x_createPost"]);
+    expect(addTools.mock.calls[0]![0].map(tool => tool.name)).toEqual(["x_createPost", "x_schedulePost"]);
   });
 });

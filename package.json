@@ -8,6 +8,8 @@
     "@tokenring-ai/utility": "workspace:*",
     "@tokenring-ai/bot": "workspace:*",
     "@tokenring-ai/chat": "workspace:*",
+    "@tokenring-ai/rpc": "workspace:*",
+    "@tokenring-ai/scheduler": "workspace:*",
     "@tokenring-ai/secrets": "workspace:*",
     "zod": "^4.6.7"
   },

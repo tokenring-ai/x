@@ -15,7 +15,7 @@ Who a bot talks to and which agent answers are configured on the bot, not here. 
 - **Mentions**: polls the mentions timeline and routes each thread as a conversation
 - **Direct messages**: polls DM events and routes each conversation as a 1:1 chat
 - **Outbound posts and DMs**: bots can reply in a thread or message a user by id
-- **Working-placeholder suppression**: the bot stream's "working..." stub is held locally so free accounts (no tweet edit) never post a placeholder they cannot replace
+- **Post-once replies**: streamed answers are posted once per part (no "working..." stub, no edits), since free accounts cannot edit a post
 - **Secrets**: access tokens use the `@tokenring-ai/secrets` pattern
 
 ## Installation
@@ -60,14 +60,22 @@ bot:
   bots:
     helper:
       agentType: assistant
-      directMessages: anyone          # or listed / none
+      directMessages: listed          # only the users below; or none
       users:
         "x:123456789": admin          # X user id
+      channels:
+        mentions:
+          target: "x:mentions"        # answer public mentions
+          allowedUsers:               # who may mention it (see the bot README)
+            - "x:123456789"
 ```
 
-Mentions and DMs both use the bot's **direct message** policy for authorization (there is no
-separate "channel" concept for public X traffic). Set `directMessages: anyone` to answer any
-mention, or `listed` and enumerate `users` as `x:<userId>`.
+DMs use the bot's **direct message** policy. Mentions are public, so they are channel traffic in
+the `mentions` room: a bot answers them only with a channel whose target is `x:mentions`, and each
+reply thread gets its own conversation. The answer is posted as a reply to the mention itself.
+
+Poll cursors are saved to `<workspace>/bot-state/x/<account>.json`, so a restart picks up the
+mentions and DMs that arrived while it was down instead of skipping or replaying them.
 
 ### Connecting from chat
 
@@ -75,7 +83,9 @@ mention, or `listed` and enumerate `users` as `x:<userId>`.
 /connect x --name=x
 ```
 
-Or paste the token when prompted interactively.
+Paste the token when prompted (a masked prompt), or pass it as a positional where nobody can answer a prompt (it then stays in
+the chat history). The token is saved in the vault (category `x`, key `<name>.accessToken`) and the account's
+`accessToken` is set to a `{ source: vault, ... }` reference to it; the vault must be unlocked.
 
 ### Addressing
 
@@ -94,16 +104,16 @@ replies on higher tiers.
 
 ### Streaming without Premium
 
-ConversationStream posts a short "working..." placeholder and then edits it as the agent answers.
-Tweet edits require Premium (Blue) and a short window. This provider **never posts** that placeholder
-to X; the first real text becomes the first post. Further edits are attempted in place, and fall back
-to a new post when edit is unavailable.
+This provider sets `editsInPlace = false`, so ConversationStream never posts a "working..." placeholder
+and never edits. Each part of an answer is posted once, when it can no longer change: a short answer is one
+post, and a long answer is one post per part (split at the platform limit). Tweet edits require Premium
+(Blue) and a short window, so posting once works on any account.
 
 ## Chat Commands
 
 | Command       | Description                                      |
 |---------------|--------------------------------------------------|
-| `/connect x`  | Save an X access token into user or project config |
+| `/connect x`  | Save an X access token to the vault and reference it from user or project config |
 
 ## Exports
 

@@ -2,6 +2,7 @@ import type TokenRingApp from "@tokenring-ai/app";
 import type { IncomingMessage, IncomingMessageHandler, MessagingProvider, SendOptions } from "@tokenring-ai/bot";
 import { HTTPRetriever } from "@tokenring-ai/utility/http/HTTPRetriever";
 import { z } from "zod";
+import type ProviderStateFile from "./ProviderStateFile.ts";
 import type { ResolvedXAccountConfig } from "./schema.ts";
 import type XService from "./XService.ts";
 
@@ -51,6 +52,7 @@ const XMentionsResponseSchema = z
         newest_id: z.string().optional(),
         oldest_id: z.string().optional(),
         result_count: z.number().optional(),
+        next_token: z.string().optional(),
       })
       .loose()
       .optional(),
@@ -117,6 +119,32 @@ const XCreateDmResponseSchema = z
   })
   .loose();
 
+/** Poll cursors saved between runs, so a restart neither skips nor replays downtime traffic. */
+export const XCursorStateSchema = z.object({
+  /** The account the cursors belong to; a token for a different account starts fresh. */
+  userId: z.string(),
+  sinceMentionId: z.string().optional(),
+  sinceDmEventId: z.string().optional(),
+  mentionsSeeded: z.boolean().default(false),
+  dmsSeeded: z.boolean().default(false),
+});
+
+export type XCursorStateFile = ProviderStateFile<typeof XCursorStateSchema>;
+
+/** Pages of new mentions or DM events followed in one poll before the rest are given up on. */
+const MAX_POLL_PAGES = 10;
+const POLL_PAGE_SIZE = 20;
+
+/**
+ * The room every public mention belongs to. Mentions are public, so they are channel traffic
+ * rather than DMs: a bot answers them when it has a channel whose target is `x:mentions`. Each
+ * reply thread still gets its own conversation (`tweet:{conversationId}`).
+ */
+export const MENTIONS_ROOM = "mentions";
+
+/** Posts and DMs must not be sent twice: retried on a 429 only, never on a 5xx. */
+const SEND_ONCE = { idempotent: false } as const;
+
 /**
  * Conversation ids on this transport are either:
  * - `dm:{conversationId}` / `dm:with:{userId}` for direct messages
@@ -138,6 +166,8 @@ const PENDING_PREFIX = "pending:";
  */
 export default class XMessagingProvider implements MessagingProvider {
   readonly maxMessageLength: number;
+  /** Most accounts cannot edit posts, and an edited public post shows its history: post each part once, when final. */
+  readonly editsInPlace = false;
 
   private retriever!: HTTPRetriever;
   private userId = "";
@@ -151,6 +181,12 @@ export default class XMessagingProvider implements MessagingProvider {
   private sinceMentionId: string | undefined;
   /** Highest DM event id already delivered. */
   private sinceDmEventId: string | undefined;
+  /**
+   * Whether each cursor has been set from the live timeline. Until it has, nothing is delivered —
+   * without a cursor, the first poll would hand the bot the latest page of old traffic.
+   */
+  private mentionsSeeded = false;
+  private dmsSeeded = false;
   /** Tweet ids we authored, so replies to them count as addressed. */
   private ownTweetIds = new Set<string>();
   private pendingSeq = 0;
@@ -161,6 +197,8 @@ export default class XMessagingProvider implements MessagingProvider {
     private readonly service: XService,
     readonly accountName: string,
     private readonly config: ResolvedXAccountConfig,
+    /** Where cursors persist between runs; without one they live only in memory. */
+    private readonly stateFile?: XCursorStateFile,
   ) {
     this.maxMessageLength = config.maxMessageLength;
   }
@@ -189,16 +227,22 @@ export default class XMessagingProvider implements MessagingProvider {
 
     this.app.serviceOutput(this.service, `X account ${this.accountName} connected as @${this.username}`);
 
-    // Seed cursors so the first poll only sees traffic from after connect.
+    // Resume from the saved cursors; seed whichever are missing so the first poll only sees
+    // traffic from after the first connect.
+    this.restoreState();
     await this.seedCursors();
 
     this.pollTimer = setInterval(() => {
       void this.poll().catch((error: unknown) => {
-        this.app.serviceError(this.service, "X poll error:", error);
+        if (!this.stopped) this.app.serviceError(this.service, "X poll error:", error);
       });
     }, this.config.pollIntervalMs);
   }
 
+  /**
+   * Stops polling. A poll already in flight checks `stopped` before each item, so it delivers
+   * nothing further and leaves the cursor on the last item it did deliver.
+   */
   async stop(): Promise<void> {
     this.stopped = true;
     if (this.pollTimer) {
@@ -208,6 +252,11 @@ export default class XMessagingProvider implements MessagingProvider {
     this.handlers.clear();
     this.pending.clear();
     this.ownTweetIds.clear();
+  }
+
+  /** Read through a call: `stop()` flips the flag while a poll is suspended in an await, which narrowing cannot see. */
+  private isStopped(): boolean {
+    return this.stopped;
   }
 
   onMessage(handler: IncomingMessageHandler): void {
@@ -302,6 +351,7 @@ export default class XMessagingProvider implements MessagingProvider {
       opts: { method: "POST", body: JSON.stringify(payload) },
       schema: XCreateTweetResponseSchema,
       context: "X create post",
+      retry: SEND_ONCE,
     });
 
     this.rememberOwnTweet(response.data.id);
@@ -323,6 +373,7 @@ export default class XMessagingProvider implements MessagingProvider {
       opts: { method: "POST", body: JSON.stringify({ text }) },
       schema: XCreateDmResponseSchema,
       context: "X create DM",
+      retry: SEND_ONCE,
     });
     return response.data.dm_event_id ?? response.data.id ?? `dm-sent-${Date.now()}`;
   }
@@ -340,147 +391,229 @@ export default class XMessagingProvider implements MessagingProvider {
       opts: { method: "POST", body: JSON.stringify({ text }) },
       schema: XCreateDmResponseSchema,
       context: "X create DM in conversation",
+      retry: SEND_ONCE,
     });
     return response.data.dm_event_id ?? response.data.id ?? `dm-sent-${Date.now()}`;
   }
 
-  private async seedCursors(): Promise<void> {
-    try {
-      if (this.config.pollMentions) {
-        const params = new URLSearchParams({ max_results: "5", "tweet.fields": "id" });
-        const response = await this.retriever.fetchValidatedJson({
-          url: `/2/users/${this.userId}/mentions?${params}`,
-          opts: { method: "GET" },
-          schema: XMentionsResponseSchema,
-          context: "X seed mentions cursor",
-        });
-        this.sinceMentionId = response.meta?.newest_id ?? response.data[0]?.id;
-      }
-    } catch (error: unknown) {
-      this.app.serviceError(this.service, "Could not seed X mentions cursor:", error);
-    }
+  private restoreState(): void {
+    const saved = this.stateFile?.load();
+    if (!saved || saved.userId !== this.userId) return;
+    this.sinceMentionId = saved.sinceMentionId;
+    this.sinceDmEventId = saved.sinceDmEventId;
+    this.mentionsSeeded = saved.mentionsSeeded;
+    this.dmsSeeded = saved.dmsSeeded;
+  }
 
+  private saveState(): void {
+    if (!this.stateFile) return;
     try {
-      if (this.config.pollDirectMessages) {
-        const params = new URLSearchParams({ max_results: "5", event_types: "MessageCreate" });
-        const response = await this.retriever.fetchValidatedJson({
-          url: `/2/dm_events?${params}`,
-          opts: { method: "GET" },
-          schema: XDmEventsResponseSchema,
-          context: "X seed DM cursor",
-        });
-        this.sinceDmEventId = response.meta?.newest_id ?? response.data[0]?.id;
-      }
+      this.stateFile.save({
+        userId: this.userId,
+        sinceMentionId: this.sinceMentionId,
+        sinceDmEventId: this.sinceDmEventId,
+        mentionsSeeded: this.mentionsSeeded,
+        dmsSeeded: this.dmsSeeded,
+      });
     } catch (error: unknown) {
-      this.app.serviceError(this.service, "Could not seed X DM cursor:", error);
+      this.app.serviceError(this.service, `Could not save X cursors to ${this.stateFile.filePath}:`, error);
     }
+  }
+
+  /** Seeds whichever cursors are not seeded yet. A failure is retried by the next poll. */
+  private async seedCursors(): Promise<void> {
+    if (this.config.pollMentions && !this.mentionsSeeded) {
+      try {
+        await this.seedMentions();
+      } catch (error: unknown) {
+        this.app.serviceError(this.service, "Could not seed X mentions cursor (will retry):", error);
+      }
+    }
+    if (this.config.pollDirectMessages && !this.dmsSeeded) {
+      try {
+        await this.seedDirectMessages();
+      } catch (error: unknown) {
+        this.app.serviceError(this.service, "Could not seed X DM cursor (will retry):", error);
+      }
+    }
+  }
+
+  private async seedMentions(): Promise<void> {
+    const params = new URLSearchParams({ max_results: "5", "tweet.fields": "id" });
+    const response = await this.retriever.fetchValidatedJson({
+      url: `/2/users/${this.userId}/mentions?${params}`,
+      opts: { method: "GET" },
+      schema: XMentionsResponseSchema,
+      context: "X seed mentions cursor",
+    });
+    if (this.isStopped()) return;
+    this.sinceMentionId = response.meta?.newest_id ?? response.data[0]?.id;
+    this.mentionsSeeded = true;
+    this.saveState();
+  }
+
+  private async seedDirectMessages(): Promise<void> {
+    const params = new URLSearchParams({ max_results: "5", event_types: "MessageCreate" });
+    const response = await this.retriever.fetchValidatedJson({
+      url: `/2/dm_events?${params}`,
+      opts: { method: "GET" },
+      schema: XDmEventsResponseSchema,
+      context: "X seed DM cursor",
+    });
+    if (this.isStopped()) return;
+    this.sinceDmEventId = response.meta?.newest_id ?? response.data[0]?.id;
+    this.dmsSeeded = true;
+    this.saveState();
   }
 
   private async poll(): Promise<void> {
     if (this.stopped || this.polling) return;
     this.polling = true;
     try {
-      if (this.config.pollMentions) await this.pollMentions();
-      if (this.config.pollDirectMessages) await this.pollDirectMessages();
+      // An unseeded cursor is seeded instead of polled: nothing is delivered until it is.
+      if (this.config.pollMentions) await (this.mentionsSeeded ? this.pollMentions() : this.seedMentions());
+      if (this.isStopped()) return;
+      if (this.config.pollDirectMessages) await (this.dmsSeeded ? this.pollDirectMessages() : this.seedDirectMessages());
     } finally {
       this.polling = false;
     }
   }
 
   private async pollMentions(): Promise<void> {
-    const params = new URLSearchParams({
-      max_results: "20",
-      expansions: "author_id",
-      "tweet.fields": "author_id,conversation_id,created_at,in_reply_to_user_id,referenced_tweets,text",
-      "user.fields": "username,name",
-    });
-    if (this.sinceMentionId) params.set("since_id", this.sinceMentionId);
+    const tweets = new Map<string, z.output<typeof XTweetSchema>>();
+    const users = new Map<string, z.output<typeof XUserSchema>>();
+    let paginationToken: string | undefined;
+    let pages = 0;
 
-    const response = await this.retriever.fetchValidatedJson({
-      url: `/2/users/${this.userId}/mentions?${params}`,
-      opts: { method: "GET" },
-      schema: XMentionsResponseSchema,
-      context: "X poll mentions",
-    });
+    // Newest first, POLL_PAGE_SIZE at a time. With a cursor, follow next_token back to it so a
+    // burst of more than one page is delivered whole; without one there is nothing to page back to.
+    do {
+      const params = new URLSearchParams({
+        max_results: String(POLL_PAGE_SIZE),
+        expansions: "author_id",
+        "tweet.fields": "author_id,conversation_id,created_at,in_reply_to_user_id,referenced_tweets,text",
+        "user.fields": "username,name",
+      });
+      if (this.sinceMentionId) params.set("since_id", this.sinceMentionId);
+      if (paginationToken) params.set("pagination_token", paginationToken);
 
-    if (response.meta?.newest_id) this.sinceMentionId = response.meta.newest_id;
+      const response = await this.retriever.fetchValidatedJson({
+        url: `/2/users/${this.userId}/mentions?${params}`,
+        opts: { method: "GET" },
+        schema: XMentionsResponseSchema,
+        context: "X poll mentions",
+      });
+      if (this.isStopped()) return;
 
-    const users = new Map((response.includes?.users ?? []).map(user => [user.id, user]));
-    // API returns newest first; deliver oldest first so conversation order is natural.
-    const tweets = [...response.data].reverse();
+      for (const tweet of response.data) tweets.set(tweet.id, tweet);
+      for (const user of response.includes?.users ?? []) users.set(user.id, user);
+      paginationToken = this.sinceMentionId ? response.meta?.next_token : undefined;
+      pages++;
+    } while (paginationToken && pages < MAX_POLL_PAGES);
 
-    for (const tweet of tweets) {
-      if (!tweet.author_id || tweet.author_id === this.userId) continue;
+    if (paginationToken) {
+      this.app.serviceError(this.service, `More than ${MAX_POLL_PAGES * POLL_PAGE_SIZE} new X mentions arrived since the last poll; the oldest were skipped`);
+    }
 
-      const author = users.get(tweet.author_id);
-      const threadId = tweet.conversation_id ?? tweet.id;
-      const replyTo = tweet.referenced_tweets?.find(ref => ref.type === "replied_to")?.id;
-      const mentioned = this.mentionsUs(tweet.text);
-      const repliedToUs = tweet.in_reply_to_user_id === this.userId || (!!replyTo && this.ownTweetIds.has(replyTo));
-
-      const message: IncomingMessage = {
-        conversationId: `${TWEET_PREFIX}${threadId}`,
-        userId: tweet.author_id,
-        userName: author ? displayName(author) : tweet.author_id,
-        text: this.stripOwnMention(tweet.text),
-        messageId: tweet.id,
-        replyToMessageId: replyTo,
-        hasAttachments: false,
-        // Public mentions are treated as DMs for bot authorization: the bot's
-        // directMessages policy (listed / anyone / none) governs who may talk,
-        // without requiring a synthetic "channel" configuration on X.
-        direct: true,
-        addressed: mentioned || repliedToUs,
-      };
-
-      await this.emit(message);
+    // Oldest first, so conversation order is natural and the cursor only ever moves past
+    // mentions that were delivered.
+    const ordered = [...tweets.values()].sort((a, b) => compareSnowflakes(a.id, b.id));
+    for (const tweet of ordered) {
+      if (this.isStopped()) return;
+      if (tweet.author_id && tweet.author_id !== this.userId) {
+        await this.emit(this.mentionMessage(tweet, tweet.author_id, users.get(tweet.author_id)));
+      }
+      this.sinceMentionId = tweet.id;
+      this.saveState();
     }
   }
 
+  private mentionMessage(tweet: z.output<typeof XTweetSchema>, authorId: string, author: z.output<typeof XUserSchema> | undefined): IncomingMessage {
+    const threadId = tweet.conversation_id ?? tweet.id;
+    const parentId = tweet.referenced_tweets?.find(ref => ref.type === "replied_to")?.id;
+    const parentIsOurs = !!parentId && this.ownTweetIds.has(parentId);
+    const mentioned = this.mentionsUs(tweet.text);
+    const repliedToUs = tweet.in_reply_to_user_id === this.userId || parentIsOurs;
+
+    return {
+      conversationId: `${TWEET_PREFIX}${threadId}`,
+      roomId: MENTIONS_ROOM,
+      userId: authorId,
+      userName: author ? displayName(author) : authorId,
+      text: this.stripOwnMention(tweet.text),
+      messageId: tweet.id,
+      // The answer goes under the mention itself; the parent is usually someone else's post.
+      replyToMessageId: parentId,
+      replyTarget: tweet.id,
+      hasAttachments: false,
+      // Public, so channel traffic: a stranger is never answered with a public refusal.
+      direct: false,
+      addressed: mentioned || repliedToUs,
+    };
+  }
+
   private async pollDirectMessages(): Promise<void> {
-    const params = new URLSearchParams({
-      max_results: "20",
-      event_types: "MessageCreate",
-      expansions: "sender_id",
-      "dm_event.fields": "id,text,event_type,sender_id,dm_conversation_id,created_at",
-      "user.fields": "username,name",
-    });
-    // dm_events does not support since_id on all tiers; filter client-side after.
+    const events = new Map<string, z.output<typeof XDmEventSchema>>();
+    const users = new Map<string, z.output<typeof XUserSchema>>();
+    let paginationToken: string | undefined;
+    let pages = 0;
+    let reachedCursor = false;
 
-    const response = await this.retriever.fetchValidatedJson({
-      url: `/2/dm_events?${params}`,
-      opts: { method: "GET" },
-      schema: XDmEventsResponseSchema,
-      context: "X poll DMs",
-    });
+    // dm_events does not take since_id on every tier, so page back (newest first) until a page
+    // reaches the cursor, then filter client-side.
+    do {
+      const params = new URLSearchParams({
+        max_results: String(POLL_PAGE_SIZE),
+        event_types: "MessageCreate",
+        expansions: "sender_id",
+        "dm_event.fields": "id,text,event_type,sender_id,dm_conversation_id,created_at",
+        "user.fields": "username,name",
+      });
+      if (paginationToken) params.set("pagination_token", paginationToken);
 
-    const users = new Map((response.includes?.users ?? []).map(user => [user.id, user]));
-    const events = [...response.data].reverse();
-    let newestSeen = this.sinceDmEventId;
+      const response = await this.retriever.fetchValidatedJson({
+        url: `/2/dm_events?${params}`,
+        opts: { method: "GET" },
+        schema: XDmEventsResponseSchema,
+        context: "X poll DMs",
+      });
+      if (this.isStopped()) return;
 
-    for (const event of events) {
-      if (event.event_type !== "MessageCreate") continue;
-      if (!event.sender_id || event.sender_id === this.userId) continue;
-      if (!event.dm_conversation_id) continue;
-      if (this.sinceDmEventId && !isSnowflakeAfter(event.id, this.sinceDmEventId)) continue;
+      for (const event of response.data) {
+        if (this.sinceDmEventId && !isSnowflakeAfter(event.id, this.sinceDmEventId)) {
+          reachedCursor = true;
+          continue;
+        }
+        events.set(event.id, event);
+      }
+      for (const user of response.includes?.users ?? []) users.set(user.id, user);
+      paginationToken = this.sinceDmEventId && !reachedCursor ? response.meta?.next_token : undefined;
+      pages++;
+    } while (paginationToken && pages < MAX_POLL_PAGES);
 
-      const sender = users.get(event.sender_id);
-      const message: IncomingMessage = {
-        conversationId: `${DM_PREFIX}${event.dm_conversation_id}`,
-        userId: event.sender_id,
-        userName: sender ? displayName(sender) : event.sender_id,
-        text: event.text ?? "",
-        messageId: event.id,
-        hasAttachments: false,
-        direct: true,
-        addressed: true,
-      };
-
-      await this.emit(message);
-      if (!newestSeen || isSnowflakeAfter(event.id, newestSeen)) newestSeen = event.id;
+    if (paginationToken) {
+      this.app.serviceError(this.service, `More than ${MAX_POLL_PAGES * POLL_PAGE_SIZE} new X DM events arrived since the last poll; the oldest were skipped`);
     }
 
-    if (newestSeen) this.sinceDmEventId = newestSeen;
+    const ordered = [...events.values()].sort((a, b) => compareSnowflakes(a.id, b.id));
+    for (const event of ordered) {
+      if (this.isStopped()) return;
+      if (event.event_type === "MessageCreate" && event.sender_id && event.sender_id !== this.userId && event.dm_conversation_id) {
+        const sender = users.get(event.sender_id);
+        await this.emit({
+          conversationId: `${DM_PREFIX}${event.dm_conversation_id}`,
+          userId: event.sender_id,
+          userName: sender ? displayName(sender) : event.sender_id,
+          text: event.text ?? "",
+          messageId: event.id,
+          hasAttachments: false,
+          direct: true,
+          addressed: true,
+        });
+      }
+      this.sinceDmEventId = event.id;
+      this.saveState();
+    }
   }
 
   private async emit(message: IncomingMessage): Promise<void> {
@@ -532,6 +665,11 @@ function otherParticipant(dmConversationId: string, selfId: string): string | un
   if (parts[0] === selfId) return parts[1];
   if (parts[1] === selfId) return parts[0];
   return undefined;
+}
+
+function compareSnowflakes(a: string, b: string): number {
+  if (a === b) return 0;
+  return isSnowflakeAfter(a, b) ? 1 : -1;
 }
 
 /** Snowflake ids are chronological when compared as big integers (or long digit strings). */

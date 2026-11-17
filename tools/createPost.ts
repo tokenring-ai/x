@@ -1,4 +1,5 @@
 import type Agent from "@tokenring-ai/agent/Agent";
+import { permissionSlug } from "@tokenring-ai/chat";
 import ChatService from "@tokenring-ai/chat/ChatService";
 import type { TokenRingToolDefinition, TokenRingToolResult } from "@tokenring-ai/chat/schema";
 import { ToolCallError } from "@tokenring-ai/chat/util/tokenRingTool";
@@ -11,8 +12,8 @@ const displayName = "X/createPost";
 const description =
   "Publish a post from a connected X account, optionally as a reply to a tweet. The post is public and cannot be unsent, so it always goes through approval.";
 
-/** A public post cannot be unsent. */
-const SAFETY_LEVEL = 7;
+/** A public post (approval standard: reaches people). */
+const SAFETY_LEVEL = 8;
 
 const inputSchema = z.object({
   text: z.string().min(1).describe("Post text"),
@@ -54,6 +55,7 @@ async function execute({ text, account, replyToTweetId }: z.output<typeof inputS
       ].join("\n"),
       safetyLevel: SAFETY_LEVEL,
       default: false,
+      permission: { id: `x.${permissionSlug(accountName)}.post`, summary: `Post on X as ${accountName}` },
     },
     agent,
   );
